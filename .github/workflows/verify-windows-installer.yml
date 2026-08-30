@@ -1,0 +1,107 @@
+name: Verificar instalador de Windows
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  clean-windows-install:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      PRODUCT_VERSION: 0.2.0
+      RELEASE_TAG: v0.2.0
+      SETUP_NAME: PrimerEmpleadoIA-Setup-0.2.0.exe
+      MANIFEST_NAME: PrimerEmpleadoIA-Setup-0.2.0.json
+    steps:
+      - name: Descargar la versión pública
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $baseUrl = "https://github.com/${{ github.repository }}/releases/download/$env:RELEASE_TAG"
+          Invoke-WebRequest "$baseUrl/$env:SETUP_NAME" -OutFile "$env:RUNNER_TEMP/$env:SETUP_NAME"
+          Invoke-WebRequest "$baseUrl/$env:MANIFEST_NAME" -OutFile "$env:RUNNER_TEMP/$env:MANIFEST_NAME"
+
+      - name: Instalar en un perfil limpio y comprobar el Companion
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $setupPath = Join-Path $env:RUNNER_TEMP $env:SETUP_NAME
+          $manifestPath = Join-Path $env:RUNNER_TEMP $env:MANIFEST_NAME
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          $actualSetupSha = (Get-FileHash -LiteralPath $setupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSetupSha -ne $manifest.setup_sha256) {
+            throw "El hash del instalador público no coincide con el manifiesto."
+          }
+          if ($manifest.authenticode_status -ne "NotSigned") {
+            throw "El manifiesto no declara de forma exacta el estado de firma de esta beta."
+          }
+
+          $profileRoot = Join-Path $env:RUNNER_TEMP "peia-clean-profile"
+          $localRoot = Join-Path $profileRoot "Local"
+          $roamingRoot = Join-Path $profileRoot "Roaming"
+          $fixtureRoot = Join-Path $profileRoot "HermesFixture"
+          New-Item -ItemType Directory -Path $localRoot, $roamingRoot, $fixtureRoot -Force | Out-Null
+
+          $hermesFixture = Join-Path $fixtureRoot "hermes.cmd"
+          "@echo off`r`necho Hermes Agent v0.20.4 (clean-runner fixture)`r`nexit /b 0`r`n" |
+            Set-Content -LiteralPath $hermesFixture -Encoding ASCII
+
+          $env:LOCALAPPDATA = $localRoot
+          $env:APPDATA = $roamingRoot
+          $env:PEIA_HERMES_PATH = $hermesFixture
+          $env:PEIA_INSTALL_NO_LAUNCH = "1"
+          $env:PEIA_INSTALL_SILENT = "1"
+
+          $setupProcess = Start-Process -FilePath $setupPath -Wait -PassThru
+          if ($setupProcess.ExitCode -ne 0) {
+            throw "El instalador terminó con código $($setupProcess.ExitCode)."
+          }
+
+          $appRoot = Join-Path $localRoot "PrimerEmpleadoIA/app"
+          $receiptPath = Join-Path $appRoot "install-receipt.json"
+          $installedExe = Join-Path $appRoot "versions/$env:PRODUCT_VERSION/peia-companion.exe"
+          if (-not (Test-Path -LiteralPath $receiptPath)) {
+            throw "El instalador no creó su comprobante."
+          }
+          if (-not (Test-Path -LiteralPath $installedExe)) {
+            throw "El Companion no quedó instalado."
+          }
+
+          $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+          if ($receipt.status -ne "installed" -or $receipt.product_version -ne $env:PRODUCT_VERSION) {
+            throw "El comprobante de instalación es inválido."
+          }
+          if ($receipt.payload_sha256 -ne $manifest.payload_sha256) {
+            throw "El contenido instalado no coincide con el manifiesto público."
+          }
+
+          $helpText = (& $installedExe --help 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $helpText -notmatch "open-builder") {
+            throw "El Companion instalado no puede abrir el constructor."
+          }
+
+          $evidence = [ordered]@{
+            status = "passed"
+            runner = $env:RUNNER_OS
+            product_version = $receipt.product_version
+            setup_sha256 = $actualSetupSha
+            payload_sha256 = $receipt.payload_sha256
+            companion_cli = "open-builder available"
+            source_checkout_used = $false
+            python_preinstalled_required = $false
+            authenticode_status = $manifest.authenticode_status
+          }
+          $evidence | ConvertTo-Json | Set-Content -LiteralPath "$env:RUNNER_TEMP/clean-windows-evidence.json" -Encoding UTF8
+          Write-Output "PEIA_CLEAN_WINDOWS_PASS"
+
+      - name: Guardar evidencia limpia
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-windows-evidence
+          path: ${{ runner.temp }}/clean-windows-evidence.json
+          if-no-files-found: error
