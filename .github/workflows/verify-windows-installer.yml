@@ -2,6 +2,11 @@ name: Verificar instalador de Windows
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Etiqueta publicada que se debe verificar
+        required: true
+        type: string
   release:
     types: [published]
 
@@ -13,11 +18,20 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     env:
-      PRODUCT_VERSION: 0.2.0
-      RELEASE_TAG: v0.2.0
-      SETUP_NAME: PrimerEmpleadoIA-Setup-0.2.0.exe
-      MANIFEST_NAME: PrimerEmpleadoIA-Setup-0.2.0.json
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
     steps:
+      - name: Resolver la versión publicada
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:RELEASE_TAG -notmatch '^v(?<version>[0-9]+\.[0-9]+\.[0-9]+)$') {
+            throw "La etiqueta pública no tiene el formato vX.Y.Z."
+          }
+          $version = $Matches.version
+          "PRODUCT_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SETUP_NAME=PrimerEmpleadoIA-Setup-$version.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MANIFEST_NAME=PrimerEmpleadoIA-Setup-$version.json" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Descargar la versión pública
         shell: pwsh
         run: |
